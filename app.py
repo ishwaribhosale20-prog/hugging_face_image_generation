@@ -1,23 +1,27 @@
 import os
+import uuid
 from io import BytesIO
 
 import streamlit as st
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
+from supabase import create_client, Client
 
 
-# ==========================================
-# LOAD ENVIRONMENT
-# ==========================================
+# ============================================================
+# LOAD ENVIRONMENT VARIABLES
+# ============================================================
 
 load_dotenv()
 
 HF_TOKEN = os.getenv("HF_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 
-# ==========================================
+# ============================================================
 # PAGE CONFIG
-# ==========================================
+# ============================================================
 
 st.set_page_config(
     page_title="AI Image Generator",
@@ -26,9 +30,9 @@ st.set_page_config(
 )
 
 
-# ==========================================
-# UI
-# ==========================================
+# ============================================================
+# UI STYLE
+# ============================================================
 
 st.markdown("""
 <style>
@@ -92,9 +96,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ==========================================
+# ============================================================
 # TITLE
-# ==========================================
+# ============================================================
 
 st.markdown(
     '<div class="main-title">🎨 AI Image Generator</div>',
@@ -107,47 +111,64 @@ st.markdown(
 )
 
 
-# ==========================================
-# CHECK TOKEN
-# ==========================================
+# ============================================================
+# CHECK ENVIRONMENT
+# ============================================================
 
 if not HF_TOKEN:
+    st.error("Hugging Face token is missing. Please add HF_TOKEN to .env.")
+    st.stop()
 
-    st.error(
-        "Hugging Face token not found. "
-        "Please add HF_TOKEN to your .env file."
-    )
+if not SUPABASE_URL:
+    st.error("Supabase URL is missing. Please add SUPABASE_URL to .env.")
+    st.stop()
 
+if not SUPABASE_KEY:
+    st.error("Supabase key is missing. Please add SUPABASE_KEY to .env.")
     st.stop()
 
 
-# ==========================================
-# HUGGING FACE CLIENT
-# ==========================================
+# ============================================================
+# CLIENTS
+# ============================================================
 
-client = InferenceClient(
-    api_key=HF_TOKEN,
-    provider="auto"
-)
+@st.cache_resource
+def get_huggingface_client():
+    return InferenceClient(
+        api_key=HF_TOKEN,
+        provider="auto"
+    )
 
 
-# ==========================================
+@st.cache_resource
+def get_supabase_client() -> Client:
+    return create_client(
+        SUPABASE_URL,
+        SUPABASE_KEY
+    )
+
+
+hf_client = get_huggingface_client()
+supabase = get_supabase_client()
+
+
+# ============================================================
 # PROMPT
-# ==========================================
+# ============================================================
 
 prompt = st.text_area(
     "✍️ Enter your prompt",
     placeholder=(
-        "Example: A beautiful bird flying across "
-        "a golden sunset sky, detailed feathers, "
-        "cinematic lighting, sharp focus"
-    )
+        "Example: A beautiful garden with children playing "
+        "under warm golden sunlight, realistic, sharp focus"
+    ),
+    height=130
 )
 
 
-# ==========================================
+# ============================================================
 # GENERATE IMAGE
-# ==========================================
+# ============================================================
 
 if st.button("✨ Generate Image"):
 
@@ -157,66 +178,117 @@ if st.button("✨ Generate Image"):
 
     final_prompt = (
         prompt.strip()
-        + ", highly detailed, sharp focus, "
-          "clear image, beautiful lighting, "
-          "high quality, detailed textures"
+        + ", highly detailed, sharp focus, clear image, "
+          "beautiful lighting, detailed textures, high quality"
     )
 
-    with st.spinner("✨ Creating your image..."):
+    try:
 
-        try:
+        # ----------------------------------------------------
+        # Generate image using Hugging Face
+        # ----------------------------------------------------
 
-            image = client.text_to_image(
+        with st.spinner("✨ Creating your image..."):
+
+            image = hf_client.text_to_image(
                 prompt=final_prompt,
                 model="black-forest-labs/FLUX.1-schnell"
             )
 
-        except Exception as e:
 
-            st.error(f"Image generation failed: {e}")
-            st.stop()
+        # ----------------------------------------------------
+        # Convert image to bytes
+        # ----------------------------------------------------
 
+        image_bytes = BytesIO()
 
-    # ==========================================
-    # SAVE
-    # ==========================================
+        image.save(
+            image_bytes,
+            format="PNG"
+        )
 
-    os.makedirs("outputs", exist_ok=True)
+        image_bytes.seek(0)
 
-    output_path = "outputs/generated_image.png"
-
-    image.save(output_path)
-
-
-    # ==========================================
-    # DISPLAY
-    # ==========================================
-
-    st.success("✨ Image generated successfully!")
-
-    st.image(
-        image,
-        caption="AI Generated Image",
-        use_container_width=True
-    )
+        image_data = image_bytes.getvalue()
 
 
-    # ==========================================
-    # DOWNLOAD
-    # ==========================================
+        # ----------------------------------------------------
+        # Create unique filename
+        # ----------------------------------------------------
 
-    image_bytes = BytesIO()
+        image_id = str(uuid.uuid4())
 
-    image.save(
-        image_bytes,
-        format="PNG"
-    )
+        file_name = f"{image_id}.png"
 
-    image_bytes.seek(0)
+        storage_path = f"generated-images/{file_name}"
 
-    st.download_button(
-        label="⬇️ Download Image",
-        data=image_bytes,
-        file_name="generated_image.png",
-        mime="image/png"
-    )
+
+        # ----------------------------------------------------
+        # Upload image to Supabase Storage
+        # ----------------------------------------------------
+
+        with st.spinner("☁️ Saving image..."):
+
+            supabase.storage.from_(
+                "generated-images"
+            ).upload(
+                path=storage_path,
+                file=image_data,
+                file_options={
+                    "content-type": "image/png",
+                    "upsert": "false"
+                }
+            )
+
+
+        # ----------------------------------------------------
+        # Get public image URL
+        # ----------------------------------------------------
+
+        image_url = supabase.storage.from_(
+            "generated-images"
+        ).get_public_url(storage_path)
+
+
+        # ----------------------------------------------------
+        # Save generation information to database
+        # ----------------------------------------------------
+
+        supabase.table("generations").insert({
+            "prompt": prompt.strip(),
+            "image_url": image_url
+        }).execute()
+
+
+        # ----------------------------------------------------
+        # Display image
+        # ----------------------------------------------------
+
+        st.success("✨ Image generated successfully!")
+
+        st.image(
+            image,
+            caption="AI Generated Image",
+            use_container_width=True
+        )
+
+
+        # ----------------------------------------------------
+        # Download
+        # ----------------------------------------------------
+
+        st.download_button(
+            label="⬇️ Download Image",
+            data=image_data,
+            file_name="generated_image.png",
+            mime="image/png"
+        )
+
+
+    except Exception as e:
+
+        st.error(
+            "Something went wrong while generating or saving the image."
+        )
+
+        st.exception(e)
