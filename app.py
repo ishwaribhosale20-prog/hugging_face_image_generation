@@ -3,16 +3,8 @@ import uuid
 from io import BytesIO
 
 import streamlit as st
-from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 from supabase import create_client, Client
-
-
-# ============================================================
-# LOAD ENVIRONMENT VARIABLES
-# ============================================================
-
-load_dotenv()
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
